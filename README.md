@@ -11,7 +11,7 @@
 ╚═════╝    ╚═╝    ╚═════╝ ╚═╝     ╚═╝     ╚═╝
 ```
 
-### 🛡️ **Build Your Own Pentest Machine - Enhanced** 🛡️
+### 🛡️ **Build Your Own Pentest Machine** 🛡️
 
 **Intelligent OS Detection & Automated Security Framework Deployment**
 
