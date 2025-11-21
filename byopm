@@ -1,0 +1,940 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+readonly BYOPM_VERSION="0.1.1"
+readonly BYOPM_AUTHOR="0xbv1 | 0xb0rn3"
+readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly TEMP_DIR="/tmp/byopm_$$"
+readonly LOG_FILE="/var/log/byopm.log"
+readonly CONFIG_DIR="$HOME/.config/byopm"
+readonly CACHE_DIR="$HOME/.cache/byopm"
+readonly HISTORY_FILE="$CONFIG_DIR/history.log"
+
+# Tool repositories
+readonly KRILIN_REPO="https://github.com/0xb0rn3/krilin.git"
+readonly KYGOX_REPO="https://github.com/0xb0rn3/kygox.git"
+
+# Modern Colors with RGB-like support
+readonly RED='\033[0;31m'
+readonly GREEN='\033[0;32m'
+readonly YELLOW='\033[1;33m'
+readonly BLUE='\033[0;34m'
+readonly MAGENTA='\033[0;35m'
+readonly CYAN='\033[0;36m'
+readonly WHITE='\033[1;37m'
+readonly BOLD='\033[1m'
+readonly DIM='\033[2m'
+readonly ITALIC='\033[3m'
+readonly UNDERLINE='\033[4m'
+readonly BLINK='\033[5m'
+readonly RESET='\033[0m'
+readonly BG_BLUE='\033[44m'
+readonly BG_GREEN='\033[42m'
+readonly BG_RED='\033[41m'
+
+# Modern UI Elements
+readonly ICON_SUCCESS="✓"
+readonly ICON_ERROR="✗"
+readonly ICON_WARNING="⚠"
+readonly ICON_INFO="ℹ"
+readonly ICON_ROCKET="🚀"
+readonly ICON_GEAR="⚙"
+readonly ICON_SHIELD="🛡"
+readonly ICON_DOWNLOAD="⬇"
+readonly ICON_INSTALL="📦"
+readonly ICON_SEARCH="🔍"
+readonly ICON_FIRE="🔥"
+readonly ICON_TARGET="🎯"
+readonly ICON_LOCK="🔒"
+readonly ICON_KEY="🔑"
+
+# OS Detection Results
+declare -g DETECTED_OS=""
+declare -g DETECTED_FAMILY=""
+declare -g PACKAGE_MANAGER=""
+declare -g APPROPRIATE_TOOL=""
+declare -g SYSTEM_ARCH=""
+declare -g KERNEL_VERSION=""
+declare -g TOTAL_RAM=""
+declare -g AVAILABLE_DISK=""
+declare -g CPU_CORES=""
+
+# Feature flags
+declare -g AUTO_UPDATE=false
+declare -g VERBOSE_MODE=false
+declare -g DRY_RUN=false
+declare -g BACKUP_ENABLED=true
+declare -g TELEMETRY=false
+
+# Progress tracking
+declare -g TOTAL_STEPS=0
+declare -g CURRENT_STEP=0
+
+# Initialize directories
+init_directories() {
+    mkdir -p "$CONFIG_DIR" "$CACHE_DIR" "$TEMP_DIR" 2>/dev/null || true
+    touch "$HISTORY_FILE" 2>/dev/null || true
+}
+
+# Enhanced logging
+log() {
+    local level="${1:-INFO}"
+    shift
+    local message="$*"
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    echo "[$timestamp] [$level] $message" >> "$LOG_FILE" 2>/dev/null || true
+}
+
+silent_exec() {
+    if [[ "$VERBOSE_MODE" == true ]]; then
+        "$@"
+    else
+        "$@" >> "$LOG_FILE" 2>&1
+    fi
+}
+
+# Modern UI Components
+print_line() {
+    local char="${1:-─}"
+    printf '%*s\n' "${COLUMNS:-80}" '' | tr ' ' "$char"
+}
+
+print_box() {
+    local text="$1"
+    local width=78
+    local padding=$(( (width - ${#text}) / 2 ))
+    
+    echo -e "${CYAN}╔$(printf '═%.0s' {1..78})╗${RESET}"
+    printf "${CYAN}║${RESET}%*s${BOLD}${WHITE}%s${RESET}%*s${CYAN}║${RESET}\n" $padding "" "$text" $padding ""
+    echo -e "${CYAN}╚$(printf '═%.0s' {1..78})╝${RESET}"
+}
+
+print_section() {
+    local title="$1"
+    echo
+    echo -e "${CYAN}┌─[ ${WHITE}${BOLD}$title${RESET}${CYAN} ]$(printf '─%.0s' {1..60})${RESET}"
+}
+
+print_section_end() {
+    echo -e "${CYAN}└$(printf '─%.0s' {1..78})${RESET}"
+    echo
+}
+
+spinner() {
+    local pid=$1
+    local message="${2:-Processing}"
+    local spin='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+    local i=0
+    
+    while kill -0 $pid 2>/dev/null; do
+        i=$(( (i+1) %10 ))
+        printf "\r${CYAN}${spin:$i:1}${RESET} ${message}..."
+        sleep 0.1
+    done
+    printf "\r${GREEN}${ICON_SUCCESS}${RESET} ${message}... ${GREEN}Done${RESET}\n"
+}
+
+progress_bar() {
+    local current=$1
+    local total=$2
+    local width=50
+    local percentage=$((current * 100 / total))
+    local filled=$((width * current / total))
+    local empty=$((width - filled))
+    
+    printf "\r${CYAN}["
+    printf "${GREEN}%${filled}s" | tr ' ' '█'
+    printf "${DIM}%${empty}s" | tr ' ' '░'
+    printf "${CYAN}]${RESET} ${WHITE}${BOLD}%3d%%${RESET} ${DIM}(%d/%d)${RESET}" $percentage $current $total
+}
+
+update_progress() {
+    CURRENT_STEP=$((CURRENT_STEP + 1))
+    progress_bar $CURRENT_STEP $TOTAL_STEPS
+}
+
+# Modern Banner with ASCII Art
+print_banner() {
+    clear
+    cat << 'EOF'
+
+    ╔════════════════════════════════════════════════════════════════════════════╗
+    ║                                                                            ║
+    ║     ██████╗ ██╗   ██╗ ██████╗ ██████╗ ███╗   ███╗    ██████╗    ██████╗  ║
+    ║     ██╔══██╗╚██╗ ██╔╝██╔═══██╗██╔══██╗████╗ ████║    ╚════██╗  ██╔═████╗ ║
+    ║     ██████╔╝ ╚████╔╝ ██║   ██║██████╔╝██╔████╔██║     █████╔╝  ██║██╔██║ ║
+    ║     ██╔══██╗  ╚██╔╝  ██║   ██║██╔═══╝ ██║╚██╔╝██║    ██╔═══╝   ████╔╝██║ ║
+    ║     ██████╔╝   ██║   ╚██████╔╝██║     ██║ ╚═╝ ██║    ███████╗  ╚██████╔╝ ║
+    ║     ╚═════╝    ╚═╝    ╚═════╝ ╚═╝     ╚═╝     ╚═╝    ╚══════╝   ╚═════╝  ║
+    ║                                                                            ║
+    ║              🛡️  Build Your Own Pentest Machine - Enhanced  🛡️              ║
+    ║                 Intelligent OS Detection & Auto Deployment                ║
+    ║                                                                            ║
+    ╚════════════════════════════════════════════════════════════════════════════╝
+
+EOF
+    echo -e "    ${DIM}Version ${BYOPM_VERSION} | By ${BYOPM_AUTHOR} | Advanced Security Toolkit${RESET}"
+    echo
+}
+
+# System information gathering
+gather_system_info() {
+    log "INFO" "Gathering system information"
+    
+    SYSTEM_ARCH=$(uname -m)
+    KERNEL_VERSION=$(uname -r)
+    TOTAL_RAM=$(free -h | awk '/^Mem:/ {print $2}')
+    AVAILABLE_DISK=$(df -h / | awk 'NR==2 {print $4}')
+    CPU_CORES=$(nproc)
+}
+
+# Enhanced OS Detection with more distros
+detect_os() {
+    print_section "System Detection"
+    echo -e "${CYAN}${ICON_SEARCH}${RESET} Analyzing system configuration..."
+    echo
+    
+    log "INFO" "Starting OS detection"
+    gather_system_info
+    
+    # Check for package managers and distros
+    if command -v apt &>/dev/null || command -v apt-get &>/dev/null; then
+        PACKAGE_MANAGER="apt"
+        DETECTED_FAMILY="debian"
+        
+        if [[ -f /etc/os-release ]]; then
+            . /etc/os-release
+            case "${ID,,}" in
+                debian) DETECTED_OS="Debian GNU/Linux" ;;
+                ubuntu) DETECTED_OS="Ubuntu Linux" ;;
+                kali) DETECTED_OS="Kali Linux" ;;
+                parrot) DETECTED_OS="Parrot Security OS" ;;
+                linuxmint|mint) DETECTED_OS="Linux Mint" ;;
+                pop) DETECTED_OS="Pop!_OS" ;;
+                elementary) DETECTED_OS="elementary OS" ;;
+                zorin) DETECTED_OS="Zorin OS" ;;
+                *) DETECTED_OS="$NAME (Debian-based)" ;;
+            esac
+        else
+            DETECTED_OS="Debian-based Linux"
+        fi
+        APPROPRIATE_TOOL="krilin"
+        
+    elif command -v pacman &>/dev/null; then
+        PACKAGE_MANAGER="pacman"
+        DETECTED_FAMILY="arch"
+        
+        if [[ -f /etc/os-release ]]; then
+            . /etc/os-release
+            case "${ID,,}" in
+                arch) DETECTED_OS="Arch Linux" ;;
+                archcraft) DETECTED_OS="Archcraft" ;;
+                manjaro) DETECTED_OS="Manjaro Linux" ;;
+                endeavouros) DETECTED_OS="EndeavourOS" ;;
+                garuda) DETECTED_OS="Garuda Linux" ;;
+                blackarch) DETECTED_OS="BlackArch Linux" ;;
+                artix) DETECTED_OS="Artix Linux" ;;
+                arcolinux) DETECTED_OS="ArcoLinux" ;;
+                *) DETECTED_OS="$NAME (Arch-based)" ;;
+            esac
+        else
+            DETECTED_OS="Arch-based Linux"
+        fi
+        APPROPRIATE_TOOL="kygox"
+        
+    elif command -v dnf &>/dev/null || command -v yum &>/dev/null; then
+        PACKAGE_MANAGER="dnf/yum"
+        DETECTED_FAMILY="redhat"
+        if [[ -f /etc/os-release ]]; then
+            . /etc/os-release
+            DETECTED_OS="$NAME"
+        else
+            DETECTED_OS="Red Hat/Fedora/CentOS"
+        fi
+        APPROPRIATE_TOOL="none"
+        
+    elif command -v zypper &>/dev/null; then
+        PACKAGE_MANAGER="zypper"
+        DETECTED_FAMILY="suse"
+        DETECTED_OS="openSUSE/SUSE Linux"
+        APPROPRIATE_TOOL="none"
+        
+    elif command -v emerge &>/dev/null; then
+        PACKAGE_MANAGER="emerge"
+        DETECTED_FAMILY="gentoo"
+        DETECTED_OS="Gentoo Linux"
+        APPROPRIATE_TOOL="none"
+        
+    elif command -v apk &>/dev/null; then
+        PACKAGE_MANAGER="apk"
+        DETECTED_FAMILY="alpine"
+        DETECTED_OS="Alpine Linux"
+        APPROPRIATE_TOOL="none"
+        
+    else
+        PACKAGE_MANAGER="unknown"
+        DETECTED_FAMILY="unknown"
+        DETECTED_OS="Unknown Linux Distribution"
+        APPROPRIATE_TOOL="none"
+    fi
+    
+    log "INFO" "Detected: $DETECTED_OS ($DETECTED_FAMILY)"
+}
+
+# Modern detection results display
+show_detection_results() {
+    echo -e "${GREEN}${ICON_SUCCESS}${RESET} ${BOLD}System Analysis Complete${RESET}"
+    echo
+    
+    # System Information Box
+    echo -e "${CYAN}┌─[ ${WHITE}${BOLD}System Information${RESET}${CYAN} ]─────────────────────────────────────────────┐${RESET}"
+    printf "${CYAN}│${RESET} ${YELLOW}%-20s${RESET} ${WHITE}%-50s${RESET} ${CYAN}│${RESET}\n" "Operating System:" "$DETECTED_OS"
+    printf "${CYAN}│${RESET} ${YELLOW}%-20s${RESET} ${WHITE}%-50s${RESET} ${CYAN}│${RESET}\n" "OS Family:" "$DETECTED_FAMILY"
+    printf "${CYAN}│${RESET} ${YELLOW}%-20s${RESET} ${WHITE}%-50s${RESET} ${CYAN}│${RESET}\n" "Package Manager:" "$PACKAGE_MANAGER"
+    printf "${CYAN}│${RESET} ${YELLOW}%-20s${RESET} ${WHITE}%-50s${RESET} ${CYAN}│${RESET}\n" "Architecture:" "$SYSTEM_ARCH"
+    printf "${CYAN}│${RESET} ${YELLOW}%-20s${RESET} ${WHITE}%-50s${RESET} ${CYAN}│${RESET}\n" "Kernel Version:" "$KERNEL_VERSION"
+    echo -e "${CYAN}├──────────────────────────────────────────────────────────────────────────┤${RESET}"
+    printf "${CYAN}│${RESET} ${YELLOW}%-20s${RESET} ${WHITE}%-50s${RESET} ${CYAN}│${RESET}\n" "CPU Cores:" "$CPU_CORES"
+    printf "${CYAN}│${RESET} ${YELLOW}%-20s${RESET} ${WHITE}%-50s${RESET} ${CYAN}│${RESET}\n" "Total RAM:" "$TOTAL_RAM"
+    printf "${CYAN}│${RESET} ${YELLOW}%-20s${RESET} ${WHITE}%-50s${RESET} ${CYAN}│${RESET}\n" "Available Disk:" "$AVAILABLE_DISK"
+    echo -e "${CYAN}├──────────────────────────────────────────────────────────────────────────┤${RESET}"
+    if [[ "$APPROPRIATE_TOOL" != "none" ]]; then
+        printf "${CYAN}│${RESET} ${YELLOW}%-20s${RESET} ${GREEN}${BOLD}%-50s${RESET} ${CYAN}│${RESET}\n" "Recommended Tool:" "$APPROPRIATE_TOOL"
+    else
+        printf "${CYAN}│${RESET} ${YELLOW}%-20s${RESET} ${RED}${BOLD}%-50s${RESET} ${CYAN}│${RESET}\n" "Recommended Tool:" "No compatible tool"
+    fi
+    echo -e "${CYAN}└──────────────────────────────────────────────────────────────────────────┘${RESET}"
+    
+    print_section_end
+}
+
+# Check system requirements
+check_system_requirements() {
+    print_section "System Requirements Check"
+    
+    local warnings=0
+    
+    # Check RAM
+    local ram_mb=$(free -m | awk '/^Mem:/ {print $2}')
+    if [[ $ram_mb -lt 2048 ]]; then
+        echo -e "${YELLOW}${ICON_WARNING}${RESET} Low RAM detected (${ram_mb}MB). Recommended: 2GB+"
+        warnings=$((warnings + 1))
+    else
+        echo -e "${GREEN}${ICON_SUCCESS}${RESET} RAM: ${ram_mb}MB ${DIM}(Sufficient)${RESET}"
+    fi
+    
+    # Check disk space
+    local disk_gb=$(df -BG / | awk 'NR==2 {print $4}' | tr -d 'G')
+    if [[ $disk_gb -lt 10 ]]; then
+        echo -e "${YELLOW}${ICON_WARNING}${RESET} Low disk space (${disk_gb}GB). Recommended: 10GB+"
+        warnings=$((warnings + 1))
+    else
+        echo -e "${GREEN}${ICON_SUCCESS}${RESET} Disk Space: ${disk_gb}GB ${DIM}(Sufficient)${RESET}"
+    fi
+    
+    # Check internet connectivity
+    if ping -c 1 -W 2 8.8.8.8 &>/dev/null; then
+        echo -e "${GREEN}${ICON_SUCCESS}${RESET} Internet: ${DIM}Connected${RESET}"
+    else
+        echo -e "${RED}${ICON_ERROR}${RESET} Internet: ${RED}No connection${RESET}"
+        warnings=$((warnings + 1))
+    fi
+    
+    print_section_end
+    
+    if [[ $warnings -gt 0 ]]; then
+        echo -e "${YELLOW}${ICON_WARNING}${RESET} ${warnings} warning(s) detected. Continue anyway?"
+        return 1
+    fi
+    
+    return 0
+}
+
+# Enhanced prerequisites check
+check_prerequisites() {
+    print_section "Prerequisites Verification"
+    
+    local missing_deps=()
+    local deps_to_check=("git" "curl" "wget" "python3")
+    
+    for dep in "${deps_to_check[@]}"; do
+        if command -v "$dep" &>/dev/null; then
+            local version=$(command -v $dep &>/dev/null && $dep --version 2>&1 | head -n1)
+            echo -e "${GREEN}${ICON_SUCCESS}${RESET} ${dep} ${DIM}${version}${RESET}"
+        else
+            echo -e "${RED}${ICON_ERROR}${RESET} ${dep} ${RED}Not installed${RESET}"
+            missing_deps+=("$dep")
+        fi
+    done
+    
+    if [[ ${#missing_deps[@]} -gt 0 ]]; then
+        echo
+        echo -e "${YELLOW}${ICON_WARNING}${RESET} Missing dependencies: ${RED}${missing_deps[*]}${RESET}"
+        echo -e "${CYAN}${ICON_INSTALL}${RESET} Installing missing dependencies..."
+        echo
+        
+        case "$PACKAGE_MANAGER" in
+            apt)
+                sudo apt-get update -qq
+                sudo apt-get install -y "${missing_deps[@]}" 2>&1 | grep -v "^Reading" || true
+                ;;
+            pacman)
+                sudo pacman -Sy --noconfirm "${missing_deps[@]}"
+                ;;
+            *)
+                echo -e "${RED}${ICON_ERROR}${RESET} Please install manually: ${missing_deps[*]}"
+                return 1
+                ;;
+        esac
+        
+        echo -e "${GREEN}${ICON_SUCCESS}${RESET} Dependencies installed"
+    fi
+    
+    print_section_end
+    return 0
+}
+
+# Enhanced clone with progress
+enhanced_clone() {
+    local repo_url="$1"
+    local target_dir="$2"
+    local repo_name=$(basename "$repo_url" .git)
+    
+    echo -e "${CYAN}${ICON_DOWNLOAD}${RESET} Cloning ${BOLD}$repo_name${RESET}..."
+    
+    if git clone --progress "$repo_url" "$target_dir" 2>&1 | \
+        grep -oP '\d+(?=%)' | while read percentage; do
+            printf "\r${CYAN}[${RESET}"
+            local filled=$((percentage / 2))
+            printf "${GREEN}%${filled}s" | tr ' ' '█'
+            printf "${DIM}%$((50 - filled))s" | tr ' ' '░'
+            printf "${CYAN}]${RESET} ${WHITE}${percentage}%%${RESET}"
+        done
+    then
+        printf "\r${GREEN}${ICON_SUCCESS}${RESET} Cloned ${BOLD}$repo_name${RESET}                                        \n"
+        log "INFO" "Successfully cloned $repo_url"
+        return 0
+    else
+        printf "\r${RED}${ICON_ERROR}${RESET} Failed to clone ${BOLD}$repo_name${RESET}                              \n"
+        log "ERROR" "Failed to clone $repo_url"
+        return 1
+    fi
+}
+
+# Backup system before deployment
+create_backup() {
+    if [[ "$BACKUP_ENABLED" != true ]]; then
+        return 0
+    fi
+    
+    print_section "Creating System Backup"
+    
+    local backup_dir="$CONFIG_DIR/backups/$(date +%Y%m%d_%H%M%S)"
+    mkdir -p "$backup_dir"
+    
+    echo -e "${CYAN}${ICON_GEAR}${RESET} Backing up configuration..."
+    
+    # Backup important configs
+    cp /etc/apt/sources.list "$backup_dir/" 2>/dev/null || true
+    
+    echo -e "${GREEN}${ICON_SUCCESS}${RESET} Backup created: ${DIM}$backup_dir${RESET}"
+    print_section_end
+}
+
+# Deploy Krilin (Enhanced)
+deploy_krilin() {
+    print_section "Krilin Security Framework Deployment"
+    
+    echo -e "${CYAN}${ICON_ROCKET}${RESET} Initializing ${BOLD}Krilin${RESET} deployment..."
+    echo
+    
+    local krilin_dir="$TEMP_DIR/krilin"
+    
+    TOTAL_STEPS=5
+    CURRENT_STEP=0
+    
+    # Step 1: Clone
+    update_progress
+    echo
+    if ! enhanced_clone "$KRILIN_REPO" "$krilin_dir"; then
+        echo -e "${RED}${ICON_ERROR}${RESET} Deployment failed"
+        return 1
+    fi
+    
+    # Step 2: Prepare
+    update_progress
+    echo
+    cd "$krilin_dir" || return 1
+    
+    # Step 3: Set permissions
+    update_progress
+    echo -e "${CYAN}${ICON_LOCK}${RESET} Setting permissions..."
+    chmod +x run core.py
+    
+    # Step 4: Verify
+    update_progress
+    echo -e "${CYAN}${ICON_SEARCH}${RESET} Verifying installation..."
+    sleep 1
+    
+    # Step 5: Launch
+    update_progress
+    echo
+    echo
+    echo -e "${GREEN}${ICON_ROCKET}${RESET} ${BOLD}Launching Krilin Security Framework...${RESET}"
+    echo
+    print_line "═"
+    echo
+    
+    sudo ./run
+    
+    local exit_code=$?
+    cd - > /dev/null
+    
+    return $exit_code
+}
+
+# Deploy Kygox (Enhanced)
+deploy_kygox() {
+    print_section "Kygox Security Arsenal Deployment"
+    
+    echo -e "${CYAN}${ICON_ROCKET}${RESET} Initializing ${BOLD}Kygox${RESET} deployment..."
+    echo
+    
+    local kygox_dir="$TEMP_DIR/kygox"
+    
+    TOTAL_STEPS=5
+    CURRENT_STEP=0
+    
+    # Step 1: Clone
+    update_progress
+    echo
+    if ! enhanced_clone "$KYGOX_REPO" "$kygox_dir"; then
+        echo -e "${RED}${ICON_ERROR}${RESET} Deployment failed"
+        return 1
+    fi
+    
+    # Step 2: Prepare
+    update_progress
+    echo
+    cd "$kygox_dir" || return 1
+    
+    # Step 3: Set permissions
+    update_progress
+    echo -e "${CYAN}${ICON_LOCK}${RESET} Setting permissions..."
+    chmod +x kygox
+    
+    # Step 4: Verify
+    update_progress
+    echo -e "${CYAN}${ICON_SEARCH}${RESET} Verifying installation..."
+    sleep 1
+    
+    # Step 5: Launch
+    update_progress
+    echo
+    echo
+    echo -e "${GREEN}${ICON_ROCKET}${RESET} ${BOLD}Launching Kygox Security Arsenal...${RESET}"
+    echo
+    print_line "═"
+    echo
+    
+    sudo ./kygox
+    
+    local exit_code=$?
+    cd - > /dev/null
+    
+    return $exit_code
+}
+
+# Main deployment orchestrator
+deploy_tool() {
+    case "$APPROPRIATE_TOOL" in
+        krilin)
+            deploy_krilin
+            ;;
+        kygox)
+            deploy_kygox
+            ;;
+        none)
+            print_section "Unsupported System"
+            echo -e "${RED}${ICON_ERROR}${RESET} ${BOLD}No compatible tool available for your operating system${RESET}"
+            echo
+            echo -e "${CYAN}${ICON_INFO}${RESET} ${BOLD}Currently Supported:${RESET}"
+            echo -e "  ${GREEN}${ICON_SUCCESS}${RESET} ${BOLD}Debian-based:${RESET} Debian, Ubuntu, Kali, Parrot, Mint, Pop!_OS"
+            echo -e "  ${GREEN}${ICON_SUCCESS}${RESET} ${BOLD}Arch-based:${RESET} Arch, Manjaro, EndeavourOS, Garuda, Archcraft, BlackArch"
+            echo
+            echo -e "${YELLOW}${ICON_WARNING}${RESET} Your system: ${RED}$DETECTED_OS ($DETECTED_FAMILY)${RESET}"
+            echo
+            echo -e "${CYAN}${ICON_INFO}${RESET} Please check ${UNDERLINE}https://github.com/0xb0rn3${RESET} for updates"
+            print_section_end
+            return 1
+            ;;
+        *)
+            echo -e "${RED}${ICON_ERROR}${RESET} Unknown tool: $APPROPRIATE_TOOL"
+            return 1
+            ;;
+    esac
+}
+
+# Interactive menu
+show_menu() {
+    echo -e "${CYAN}╔════════════════════════════════════════════════════════════════╗${RESET}"
+    echo -e "${CYAN}║${RESET}                     ${BOLD}${WHITE}BYOPM OPTIONS MENU${RESET}                      ${CYAN}║${RESET}"
+    echo -e "${CYAN}╠════════════════════════════════════════════════════════════════╣${RESET}"
+    echo -e "${CYAN}║${RESET}  ${GREEN}1${RESET}) ${ICON_ROCKET} Deploy Security Tools              ${DIM}[Recommended]${RESET}  ${CYAN}║${RESET}"
+    echo -e "${CYAN}║${RESET}  ${GREEN}2${RESET}) ${ICON_SEARCH} Show System Information                          ${CYAN}║${RESET}"
+    echo -e "${CYAN}║${RESET}  ${GREEN}3${RESET}) ${ICON_GEAR} Check Prerequisites                              ${CYAN}║${RESET}"
+    echo -e "${CYAN}║${RESET}  ${GREEN}4${RESET}) ${ICON_INSTALL} Update Tool Repositories                          ${CYAN}║${RESET}"
+    echo -e "${CYAN}║${RESET}  ${GREEN}5${RESET}) ${ICON_INFO} View Deployment History                          ${CYAN}║${RESET}"
+    echo -e "${CYAN}║${RESET}  ${GREEN}6${RESET}) ${ICON_FIRE} Enable Verbose Mode                              ${CYAN}║${RESET}"
+    echo -e "${CYAN}║${RESET}  ${RED}0${RESET}) ${ICON_ERROR} Exit                                                ${CYAN}║${RESET}"
+    echo -e "${CYAN}╚════════════════════════════════════════════════════════════════╝${RESET}"
+    echo
+}
+
+# History logging
+log_deployment() {
+    local tool="$1"
+    local status="$2"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Tool: $tool | Status: $status | OS: $DETECTED_OS" >> "$HISTORY_FILE"
+}
+
+view_history() {
+    print_section "Deployment History"
+    
+    if [[ -f "$HISTORY_FILE" ]] && [[ -s "$HISTORY_FILE" ]]; then
+        tail -n 10 "$HISTORY_FILE" | while IFS= read -r line; do
+            echo -e "${DIM}$line${RESET}"
+        done
+    else
+        echo -e "${YELLOW}${ICON_WARNING}${RESET} No deployment history found"
+    fi
+    
+    print_section_end
+}
+
+# Cleanup
+cleanup() {
+    log "INFO" "Cleaning up temporary files"
+    rm -rf "$TEMP_DIR" 2>/dev/null || true
+}
+
+# Root check with modern UI
+check_root() {
+    if [[ $EUID -ne 0 ]]; then
+        clear
+        print_banner
+        echo -e "${RED}╔════════════════════════════════════════════════════════════════╗${RESET}"
+        echo -e "${RED}║${RESET}  ${ICON_LOCK} ${BOLD}${RED}ROOT PRIVILEGES REQUIRED${RESET}                               ${RED}║${RESET}"
+        echo -e "${RED}╠════════════════════════════════════════════════════════════════╣${RESET}"
+        echo -e "${RED}║${RESET}  This tool requires root privileges to:                    ${RED}║${RESET}"
+        echo -e "${RED}║${RESET}    ${ICON_INSTALL} Install system packages                              ${RED}║${RESET}"
+        echo -e "${RED}║${RESET}    ${ICON_GEAR} Modify system configurations                         ${RED}║${RESET}"
+        echo -e "${RED}║${RESET}    ${ICON_SHIELD} Deploy security tools                                ${RED}║${RESET}"
+        echo -e "${RED}╠════════════════════════════════════════════════════════════════╣${RESET}"
+        echo -e "${RED}║${RESET}  ${YELLOW}Please run:${RESET} ${GREEN}${BOLD}sudo $0${RESET}                                ${RED}║${RESET}"
+        echo -e "${RED}╚════════════════════════════════════════════════════════════════╝${RESET}"
+        echo
+        exit 1
+    fi
+}
+
+# Parse command line arguments
+parse_arguments() {
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            -v|--verbose)
+                VERBOSE_MODE=true
+                shift
+                ;;
+            -d|--dry-run)
+                DRY_RUN=true
+                shift
+                ;;
+            --no-backup)
+                BACKUP_ENABLED=false
+                shift
+                ;;
+            -h|--help)
+                show_help
+                exit 0
+                ;;
+            --version)
+                echo "BYOPM v${BYOPM_VERSION}"
+                exit 0
+                ;;
+            *)
+                echo -e "${RED}Unknown option: $1${RESET}"
+                show_help
+                exit 1
+                ;;
+        esac
+    done
+}
+
+# Show help
+show_help() {
+    cat << EOF
+${BOLD}BYOPM - Build Your Own Pentest Machine v${BYOPM_VERSION}${RESET}
+
+${BOLD}USAGE:${RESET}
+    sudo $0 [OPTIONS]
+
+${BOLD}OPTIONS:${RESET}
+    -v, --verbose       Enable verbose output
+    -d, --dry-run       Simulate deployment without making changes
+    --no-backup         Skip backup creation
+    -h, --help          Show this help message
+    --version           Show version information
+
+${BOLD}EXAMPLES:${RESET}
+    sudo $0                    # Normal deployment
+    sudo $0 --verbose          # Verbose mode
+    sudo $0 --dry-run          # Test without changes
+
+${BOLD}SUPPORTED SYSTEMS:${RESET}
+    • Debian-based: Debian, Ubuntu, Kali, Parrot, Mint, Pop!_OS
+    • Arch-based: Arch, Manjaro, EndeavourOS, Garuda, Archcraft
+
+${BOLD}MORE INFO:${RESET}
+    GitHub: https://github.com/0xb0rn3
+    Author: ${BYOPM_AUTHOR}
+
+EOF
+}
+
+# Confirmation prompt with modern styling
+confirm_deployment() {
+    echo
+    print_line "─"
+    echo
+    echo -e "${YELLOW}${ICON_WARNING}${RESET} ${BOLD}Deployment Confirmation${RESET}"
+    echo
+    echo -e "${WHITE}You are about to deploy:${RESET} ${GREEN}${BOLD}$APPROPRIATE_TOOL${RESET}"
+    echo -e "${WHITE}Target system:${RESET} ${CYAN}$DETECTED_OS${RESET}"
+    echo -e "${WHITE}This will:${RESET}"
+    echo -e "  ${CYAN}•${RESET} Install security tools and dependencies"
+    echo -e "  ${CYAN}•${RESET} Modify system configurations"
+    echo -e "  ${CYAN}•${RESET} Clone remote repositories"
+    if [[ "$BACKUP_ENABLED" == true ]]; then
+        echo -e "  ${CYAN}•${RESET} Create system backup"
+    fi
+    echo
+    print_line "─"
+    echo
+    
+    if [[ "$DRY_RUN" == true ]]; then
+        echo -e "${YELLOW}${ICON_INFO}${RESET} ${BOLD}DRY RUN MODE${RESET} - No changes will be made"
+        return 0
+    fi
+    
+    read -p "$(echo -e ${BOLD}${WHITE}Proceed with deployment? ${RESET}${GREEN}[Y/n]:${RESET} )" -n 1 -r
+    echo
+    
+    if [[ $REPLY =~ ^[Nn]$ ]]; then
+        echo -e "${YELLOW}${ICON_WARNING}${RESET} Deployment cancelled by user"
+        return 1
+    fi
+    
+    return 0
+}
+
+# Update repositories
+update_repos() {
+    print_section "Repository Update"
+    
+    echo -e "${CYAN}${ICON_DOWNLOAD}${RESET} Checking for updates..."
+    
+    case "$PACKAGE_MANAGER" in
+        apt)
+            echo -e "${CYAN}${ICON_GEAR}${RESET} Updating APT repositories..."
+            sudo apt-get update -qq && \
+            echo -e "${GREEN}${ICON_SUCCESS}${RESET} Repositories updated"
+            ;;
+        pacman)
+            echo -e "${CYAN}${ICON_GEAR}${RESET} Updating Pacman repositories..."
+            sudo pacman -Sy && \
+            echo -e "${GREEN}${ICON_SUCCESS}${RESET} Repositories updated"
+            ;;
+        *)
+            echo -e "${YELLOW}${ICON_WARNING}${RESET} Manual update required for $PACKAGE_MANAGER"
+            ;;
+    esac
+    
+    print_section_end
+}
+
+# Success summary
+show_success_summary() {
+    clear
+    echo
+    echo -e "${GREEN}╔════════════════════════════════════════════════════════════════╗${RESET}"
+    echo -e "${GREEN}║${RESET}  ${ICON_SUCCESS} ${BOLD}${GREEN}DEPLOYMENT COMPLETED SUCCESSFULLY${RESET}                      ${GREEN}║${RESET}"
+    echo -e "${GREEN}╠════════════════════════════════════════════════════════════════╣${RESET}"
+    echo -e "${GREEN}║${RESET}  ${ICON_ROCKET} Tool deployed: ${BOLD}$APPROPRIATE_TOOL${RESET}                           ${GREEN}║${RESET}"
+    echo -e "${GREEN}║${RESET}  ${ICON_SHIELD} System: $DETECTED_OS${RESET}                                 ${GREEN}║${RESET}"
+    echo -e "${GREEN}║${RESET}  ${ICON_GEAR} Architecture: $SYSTEM_ARCH${RESET}                                ${GREEN}║${RESET}"
+    echo -e "${GREEN}╠════════════════════════════════════════════════════════════════╣${RESET}"
+    echo -e "${GREEN}║${RESET}  ${ICON_INFO} ${BOLD}Next Steps:${RESET}                                           ${GREEN}║${RESET}"
+    echo -e "${GREEN}║${RESET}    1. Review installed tools                              ${GREEN}║${RESET}"
+    echo -e "${GREEN}║${RESET}    2. Configure security settings                         ${GREEN}║${RESET}"
+    echo -e "${GREEN}║${RESET}    3. Run system updates                                  ${GREEN}║${RESET}"
+    echo -e "${GREEN}╠════════════════════════════════════════════════════════════════╣${RESET}"
+    echo -e "${GREEN}║${RESET}  ${ICON_KEY} Log file: ${DIM}$LOG_FILE${RESET}               ${GREEN}║${RESET}"
+    echo -e "${GREEN}╚════════════════════════════════════════════════════════════════╝${RESET}"
+    echo
+}
+
+# Error summary
+show_error_summary() {
+    echo
+    echo -e "${RED}╔════════════════════════════════════════════════════════════════╗${RESET}"
+    echo -e "${RED}║${RESET}  ${ICON_ERROR} ${BOLD}${RED}DEPLOYMENT FAILED${RESET}                                      ${RED}║${RESET}"
+    echo -e "${RED}╠════════════════════════════════════════════════════════════════╣${RESET}"
+    echo -e "${RED}║${RESET}  ${ICON_WARNING} Deployment encountered errors                          ${RED}║${RESET}"
+    echo -e "${RED}║${RESET}  ${ICON_SEARCH} Check the log file for details:                        ${RED}║${RESET}"
+    echo -e "${RED}║${RESET}     ${DIM}$LOG_FILE${RESET}                  ${RED}║${RESET}"
+    echo -e "${RED}╠════════════════════════════════════════════════════════════════╣${RESET}"
+    echo -e "${RED}║${RESET}  ${ICON_INFO} ${BOLD}Troubleshooting:${RESET}                                      ${RED}║${RESET}"
+    echo -e "${RED}║${RESET}    • Check internet connection                             ${RED}║${RESET}"
+    echo -e "${RED}║${RESET}    • Verify system compatibility                           ${RED}║${RESET}"
+    echo -e "${RED}║${RESET}    • Run with ${BOLD}--verbose${RESET} flag for more details            ${RED}║${RESET}"
+    echo -e "${RED}║${RESET}    • Report issues: github.com/0xb0rn3                     ${RED}║${RESET}"
+    echo -e "${RED}╚════════════════════════════════════════════════════════════════╝${RESET}"
+    echo
+}
+
+# Interactive mode
+interactive_mode() {
+    local choice
+    while true; do
+        show_menu
+        read -p "$(echo -e ${CYAN}Select option:${RESET} )" choice
+        echo
+        
+        case $choice in
+            1)
+                if confirm_deployment; then
+                    echo
+                    create_backup
+                    if deploy_tool; then
+                        log_deployment "$APPROPRIATE_TOOL" "SUCCESS"
+                        show_success_summary
+                    else
+                        log_deployment "$APPROPRIATE_TOOL" "FAILED"
+                        show_error_summary
+                    fi
+                    read -p "$(echo -e ${CYAN}Press Enter to continue...${RESET})"
+                else
+                    echo -e "${YELLOW}${ICON_WARNING}${RESET} Deployment cancelled"
+                    sleep 2
+                fi
+                clear
+                print_banner
+                detect_os
+                show_detection_results
+                ;;
+            2)
+                show_detection_results
+                check_system_requirements
+                read -p "$(echo -e ${CYAN}Press Enter to continue...${RESET})"
+                clear
+                print_banner
+                ;;
+            3)
+                check_prerequisites
+                read -p "$(echo -e ${CYAN}Press Enter to continue...${RESET})"
+                clear
+                print_banner
+                ;;
+            4)
+                update_repos
+                read -p "$(echo -e ${CYAN}Press Enter to continue...${RESET})"
+                clear
+                print_banner
+                ;;
+            5)
+                view_history
+                read -p "$(echo -e ${CYAN}Press Enter to continue...${RESET})"
+                clear
+                print_banner
+                ;;
+            6)
+                VERBOSE_MODE=true
+                echo -e "${GREEN}${ICON_SUCCESS}${RESET} Verbose mode enabled"
+                sleep 2
+                clear
+                print_banner
+                ;;
+            0)
+                echo -e "${CYAN}${ICON_INFO}${RESET} Thank you for using BYOPM!"
+                echo -e "${DIM}Stay secure! 🛡️${RESET}"
+                echo
+                exit 0
+                ;;
+            *)
+                echo -e "${RED}${ICON_ERROR}${RESET} Invalid option: ${RED}$choice${RESET}"
+                sleep 2
+                clear
+                print_banner
+                ;;
+        esac
+    done
+}
+
+# Main function
+main() {
+    # Parse arguments
+    parse_arguments "$@"
+    
+    # Setup
+    trap cleanup EXIT
+    init_directories
+    
+    # Root check
+    check_root
+    
+    # Display banner
+    print_banner
+    
+    # Detect OS
+    detect_os
+    show_detection_results
+    
+    # Check system requirements
+    check_system_requirements || true
+    
+    # Check if we should go interactive
+    if [[ $# -eq 0 ]]; then
+        interactive_mode
+    else
+        # Direct deployment mode
+        if ! check_prerequisites; then
+            show_error_summary
+            exit 1
+        fi
+        
+        echo
+        
+        if confirm_deployment; then
+            echo
+            create_backup
+            
+            if deploy_tool; then
+                log_deployment "$APPROPRIATE_TOOL" "SUCCESS"
+                show_success_summary
+                exit 0
+            else
+                log_deployment "$APPROPRIATE_TOOL" "FAILED"
+                show_error_summary
+                exit 1
+            fi
+        else
+            echo -e "${YELLOW}${ICON_WARNING}${RESET} Deployment cancelled"
+            exit 0
+        fi
+    fi
+}
+
+# Execute main function
+main "$@"
